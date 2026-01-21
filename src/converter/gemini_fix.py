@@ -319,16 +319,23 @@ async def normalize_gemini_request(
                             if isinstance(content, dict) and content.get("role") == "model":
                                 # 在 parts 开头插入思考块（使用官方跳过验证的虚拟签名）
                                 parts = content.get("parts", [])
-                                thinking_part = {
+                                # 如果第一个 part 不是 thinking，则插入
+                                if not parts or not (isinstance(parts[0], dict) and ("thought" in parts[0] or "thoughtSignature" in parts[0])):
+                                    content["parts"] = [{
                                     "text": "...",
                                     # "thought": True,  # 标记为思考块
                                     "thoughtSignature": "skip_thought_signature_validator"  # 官方文档推荐的虚拟签名
-                                }
-                                # 如果第一个 part 不是 thinking，则插入
-                                if not parts or not (isinstance(parts[0], dict) and ("thought" in parts[0] or "thoughtSignature" in parts[0])):
-                                    content["parts"] = [thinking_part] + parts
+                                }] + parts
                                     log.debug(f"[ANTIGRAVITY] 已在最后一个 assistant 消息开头插入思考块（含跳过验证签名）")
                                 break
+                # 一种尝试修复gemini 3思路签名方法
+                elif "gemini-3" in model:
+                    for c in contents:
+                        if c.get("role") == "model":
+                            p0 = (c.get("parts") or [None])[0]
+                            ts = p0.get("thoughtSignature") if isinstance(p0, dict) else None
+                            if not isinstance(ts, str) or len(ts) < 56:
+                                p0["thoughtSignature"] = "skip_thought_signature_validator"
                 
             # 移除 -thinking 后缀
             model = model.replace("-thinking", "")
