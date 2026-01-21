@@ -5,6 +5,7 @@ Antigravity API Client - Handles communication with Google's Antigravity API
 
 import asyncio
 import json
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
