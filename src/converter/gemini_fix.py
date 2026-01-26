@@ -1,430 +1,895 @@
 """
-Gemini Format Utilities - 统一的 Gemini 格式处理和转换工具
-提供对 Gemini API 请求体和响应的标准化处理
-────────────────────────────────────────────────────────────────
+MongoDB 存储管理器
 """
-from typing import Any, Dict, Optional
+
+import os
+import time
+import re
+from typing import Any, Dict, List, Optional
+
+from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 
 from log import log
-from src.utils import DEFAULT_SAFETY_SETTINGS
 
-# ==================== Gemini API 配置 ====================
 
-def prepare_image_generation_request(
-    request_body: Dict[str, Any],
-    model: str
-) -> Dict[str, Any]:
-    """
-    图像生成模型请求体后处理
-    
-    Args:
-        request_body: 原始请求体
-        model: 模型名称
-    
-    Returns:
-        处理后的请求体
-    """
-    request_body = request_body.copy()
-    model_lower = model.lower()
-    
-    # 解析分辨率
-    image_size = "4K" if "-4k" in model_lower else "2K" if "-2k" in model_lower else None
-    
-    # 解析比例
-    aspect_ratio = None
-    for suffix, ratio in [
-        ("-21x9", "21:9"), ("-16x9", "16:9"), ("-9x16", "9:16"),
-        ("-4x3", "4:3"), ("-3x4", "3:4"), ("-1x1", "1:1")
-    ]:
-        if suffix in model_lower:
-            aspect_ratio = ratio
-            break
-    
-    # 构建 imageConfig
-    image_config = {}
-    if aspect_ratio:
-        image_config["aspectRatio"] = aspect_ratio
-    if image_size:
-        image_config["imageSize"] = image_size
+class MongoDBManager:
+    """MongoDB 数据库管理器"""
 
-    request_body["model"] = "gemini-3-pro-image"  # 统一使用基础模型名
-    request_body["generationConfig"] = {
-        "candidateCount": 1,
-        "imageConfig": image_config
+    # 状态字段常量
+    STATE_FIELDS = {
+        "error_codes",
+        "disabled",
+        "last_success",
+        "user_email",
+        "model_cooldowns",
     }
 
-    # 移除不需要的字段
-    for key in ("systemInstruction", "tools", "toolConfig"):
-        request_body.pop(key, None)
-    
-    return request_body
+    def __init__(self):
+        self._client: Optional[AsyncIOMotorClient] = None
+        self._db: Optional[AsyncIOMotorDatabase] = None
+        self._initialized = False
 
+        # 内存配置缓存 - 初始化时加载一次
+        self._config_cache: Dict[str, Any] = {}
+        self._config_loaded = False
 
-# ==================== 模型特性辅助函数 ====================
+    async def initialize(self) -> None:
+        """初始化 MongoDB 连接"""
+        if self._initialized:
+            return
 
-def get_base_model_name(model_name: str) -> str:
-    """移除模型名称中的后缀,返回基础模型名"""
-    # 按照从长到短的顺序排列，避免短后缀先于长后缀被匹配
-    suffixes = [
-        "-maxthinking", "-nothinking",  # 兼容旧模式
-        "-minimal", "-medium", "-search", "-think",  # 中等长度后缀
-        "-high", "-max", "-low"  # 短后缀
-    ]
-    result = model_name
-    changed = True
-    # 持续循环直到没有任何后缀可以移除
-    while changed:
-        changed = False
-        for suffix in suffixes:
-            if result.endswith(suffix):
-                result = result[:-len(suffix)]
-                changed = True
-                # 不使用 break，继续检查是否还有其他后缀
-    return result
+        try:
+            mongodb_uri = os.getenv("MONGODB_URI")
+            if not mongodb_uri:
+                raise ValueError("MONGODB_URI environment variable not set")
 
+            database_name = os.getenv("MONGODB_DATABASE", "gcli2api")
 
-def get_thinking_settings(model_name: str) -> tuple[Optional[int], Optional[str]]:
-    """
-    根据模型名称获取思考配置
+            self._client = AsyncIOMotorClient(mongodb_uri)
+            self._db = self._client[database_name]
 
-    支持两种模式:
-    1. CLI 模式思考预算 (Gemini 2.5 系列): -max, -high, -medium, -low, -minimal
-    2. CLI 模式思考等级 (Gemini 3 Preview 系列): -high, -medium, -low, -minimal (仅 3-flash)
-    3. 兼容旧模式: -maxthinking, -nothinking (不返回给用户)
+            # 测试连接
+            await self._db.command("ping")
 
-    Returns:
-        (thinking_budget, thinking_level): 思考预算和思考等级
-    """
-    base_model = get_base_model_name(model_name)
+            # 创建索引
+            await self._create_indexes()
 
-    # ========== 兼容旧模式 (不返回给用户) ==========
-    if "-nothinking" in model_name:
-        # nothinking 模式: 限制思考
-        if "flash" in base_model:
-            return 0, None
-        return 128, None
-    elif "-maxthinking" in model_name:
-        # maxthinking 模式: 最大思考预算
-        budget = 24576 if "flash" in base_model else 32768
-        return budget, None
+            # 加载配置到内存
+            await self._load_config_cache()
 
-    # ========== 新 CLI 模式: 基于思考预算/等级 ==========
+            self._initialized = True
+            log.info(f"MongoDB storage initialized (database: {database_name})")
 
-    # Gemini 3 Preview 系列: 使用 thinkingLevel
-    if "gemini-3" in base_model:
-        if "-high" in model_name:
-            return None, "high"
-        elif "-medium" in model_name:
-            # 仅 3-flash-preview 支持 medium
-            if "flash" in base_model:
-                return None, "medium"
-            # pro 系列不支持 medium，返回 Default
-            return None, None
-        elif "-low" in model_name:
-            return None, "low"
-        elif "-minimal" in model_name:
-            return None, None
+        except Exception as e:
+            log.error(f"Error initializing MongoDB: {e}")
+            raise
+
+    async def _create_indexes(self):
+        """创建索引"""
+        credentials_collection = self._db["credentials"]
+        antigravity_credentials_collection = self._db["antigravity_credentials"]
+
+        # 创建普通凭证索引
+        await credentials_collection.create_index("filename", unique=True)
+        await credentials_collection.create_index("disabled")
+        await credentials_collection.create_index("rotation_order")
+
+        # 复合索引
+        await credentials_collection.create_index([("disabled", 1), ("rotation_order", 1)])
+
+        # 如果经常按错误码筛选，可以添加此索引
+        await credentials_collection.create_index("error_codes")
+
+        # 创建 Antigravity 凭证索引
+        await antigravity_credentials_collection.create_index("filename", unique=True)
+        await antigravity_credentials_collection.create_index("disabled")
+        await antigravity_credentials_collection.create_index("rotation_order")
+
+        # 复合索引
+        await antigravity_credentials_collection.create_index([("disabled", 1), ("rotation_order", 1)])
+
+        # 如果经常按错误码筛选，可以添加此索引
+        await antigravity_credentials_collection.create_index("error_codes")
+
+        log.debug("MongoDB indexes created")
+
+    async def _load_config_cache(self):
+        """加载配置到内存缓存（仅在初始化时调用一次）"""
+        if self._config_loaded:
+            return
+
+        try:
+            config_collection = self._db["config"]
+            cursor = config_collection.find({})
+
+            async for doc in cursor:
+                self._config_cache[doc["key"]] = doc.get("value")
+
+            self._config_loaded = True
+            log.debug(f"Loaded {len(self._config_cache)} config items into cache")
+
+        except Exception as e:
+            log.error(f"Error loading config cache: {e}")
+            self._config_cache = {}
+
+    async def close(self) -> None:
+        """关闭 MongoDB 连接"""
+        if self._client:
+            self._client.close()
+            self._client = None
+            self._db = None
+        self._initialized = False
+        log.debug("MongoDB storage closed")
+
+    def _ensure_initialized(self):
+        """确保已初始化"""
+        if not self._initialized:
+            raise RuntimeError("MongoDB manager not initialized")
+
+    def _get_collection_name(self, mode: str) -> str:
+        """根据 mode 获取对应的集合名"""
+        if mode == "antigravity":
+            return "antigravity_credentials"
+        elif mode == "geminicli":
+            return "credentials"
         else:
-            # Default: 不设置 thinking 配置
-            return None, None
+            raise ValueError(f"Invalid mode: {mode}. Must be 'geminicli' or 'antigravity'")
 
-    # Gemini 2.5 系列: 使用 thinkingBudget
-    elif "gemini-2.5" in base_model:
-        if "-max" in model_name:
-            # 2.5-flash-max: 24576, 2.5-pro-max: 32768
-            budget = 24576 if "flash" in base_model else 32768
-            return budget, None
-        elif "-high" in model_name:
-            # 2.5-flash-high: 16000, 2.5-pro-high: 16000
-            return 16000, None
-        elif "-medium" in model_name:
-            # 2.5-flash-medium: 8192, 2.5-pro-medium: 8192
-            return 8192, None
-        elif "-low" in model_name:
-            # 2.5-flash-low: 1024, 2.5-pro-low: 1024
-            return 1024, None
-        elif "-minimal" in model_name:
-            # 2.5-flash-minimal: 0, 2.5-pro-minimal: 128
-            budget = 0 if "flash" in base_model else 128
-            return budget, None
-        else:
-            # Default: 不设置 thinking budget
-            return None, None
+    # ============ SQL 方法 ============
 
-    # 其他模型: 不设置 thinking 配置
-    return None, None
+    async def get_next_available_credential(
+        self, mode: str = "geminicli", model_key: Optional[str] = None
+    ) -> Optional[tuple[str, Dict[str, Any]]]:
+        """
+        随机获取一个可用凭证（负载均衡）
+        - 未禁用
+        - 如果提供了 model_key，还会检查模型级冷却
+        - 随机选择
 
+        Args:
+            mode: 凭证模式 ("geminicli" 或 "antigravity")
+            model_key: 模型键（用于模型级冷却检查，antigravity 用模型名，gcli 用 pro/flash）
 
-def is_search_model(model_name: str) -> bool:
-    """检查是否为搜索模型"""
-    return "-search" in model_name
+        Note:
+            - 对于 antigravity: model_key 是具体模型名（如 "gemini-2.0-flash-exp"）
+            - 对于 gcli: model_key 是 "pro" 或 "flash"
+            - 使用聚合管道在数据库层面过滤冷却状态，性能更优
+        """
+        self._ensure_initialized()
 
+        try:
+            collection_name = self._get_collection_name(mode)
+            collection = self._db[collection_name]
+            current_time = time.time()
 
-# ==================== 统一的 Gemini 请求后处理 ====================
+            # 构建聚合管道
+            pipeline = [
+                # 第一步: 筛选未禁用的凭证
+                {"$match": {"disabled": False}},
+            ]
 
-def is_thinking_model(model_name: str) -> bool:
-    """检查是否为思考模型 (包含 -thinking 或 pro)"""
-    return "think" in model_name or "pro" in model_name.lower()
+            # 如果提供了 model_key，添加冷却检查
+            if model_key:
+                pipeline.extend([
+                    # 第二步: 添加冷却状态字段
+                    {
+                        "$addFields": {
+                            "is_available": {
+                                "$or": [
+                                    # model_cooldowns 中没有该 model_key
+                                    {"$not": {"$ifNull": [f"$model_cooldowns.{model_key}", False]}},
+                                    # 或者冷却时间已过期
+                                    {"$lte": [f"$model_cooldowns.{model_key}", current_time]}
+                                ]
+                            }
+                        }
+                    },
+                    # 第三步: 只保留可用的凭证
+                    {"$match": {"is_available": True}},
+                ])
 
+            # 第四步: 随机抽取一个
+            pipeline.append({"$sample": {"size": 1}})
 
-async def normalize_gemini_request(
-    request: Dict[str, Any],
-    mode: str = "geminicli"
-) -> Dict[str, Any]:
-    """
-    规范化 Gemini 请求
+            # 第五步: 只投影需要的字段
+            pipeline.append({
+                "$project": {
+                    "filename": 1,
+                    "credential_data": 1,
+                    "_id": 0
+                }
+            })
 
-    处理逻辑:
-    1. 模型特性处理 (thinking config, search tools)
-    3. 参数范围限制 (maxOutputTokens, topK)
-    4. 工具清理
+            # 执行聚合
+            docs = await collection.aggregate(pipeline).to_list(length=1)
 
-    Args:
-        request: 原始请求字典
-        mode: 模式 ("geminicli" 或 "antigravity")
+            if docs:
+                doc = docs[0]
+                return doc["filename"], doc.get("credential_data")
 
-    Returns:
-        规范化后的请求
-    """
-    # 导入配置函数
-    from config import get_return_thoughts_to_frontend
+            return None
 
-    result = request.copy()
-    model = result.get("model", "")
-    generation_config = (result.get("generationConfig") or {}).copy()  # 创建副本避免修改原对象
-    tools = result.get("tools")
-    system_instruction = result.get("systemInstruction") or result.get("system_instructions")
-    
-    # 记录原始请求
-    log.debug(f"[GEMINI_FIX] 原始请求 - 模型: {model}, mode: {mode}, generationConfig: {generation_config}")
+        except Exception as e:
+            log.error(f"Error getting next available credential (mode={mode}, model_key={model_key}): {e}")
+            return None
 
-    # 获取配置值
-    return_thoughts = await get_return_thoughts_to_frontend()
+    async def get_available_credentials_list(self, mode: str = "geminicli") -> List[str]:
+        """
+        获取所有可用凭证列表
+        - 未禁用
+        - 按轮换顺序排序
+        """
+        self._ensure_initialized()
 
-    # ========== 模式特定处理 ==========
-    if mode == "geminicli":
-        # 1. 思考设置
-        # 优先使用 get_thinking_settings 获取的思考预算和等级
-        thinking_budget, thinking_level = get_thinking_settings(model)
+        try:
+            collection_name = self._get_collection_name(mode)
+            collection = self._db[collection_name]
 
-        # 其次使用传入的思考预算（如果未从模型名称获取）
-        if thinking_budget is None and thinking_level is None:
-            thinking_budget = generation_config.get("thinkingConfig", {}).get("thinkingBudget")
-            thinking_level = generation_config.get("thinkingConfig", {}).get("thinkingLevel")
+            pipeline = [
+                {"$match": {"disabled": False}},
+                {"$sort": {"rotation_order": 1}},
+                {"$project": {"filename": 1, "_id": 0}}
+            ]
 
-        # 假如 is_thinking_model 为真或者思考预算/等级不为空，设置 thinkingConfig
-        if is_thinking_model(model) or thinking_budget is not None or thinking_level is not None:
-            # 确保 thinkingConfig 存在
-            if "thinkingConfig" not in generation_config:
-                generation_config["thinkingConfig"] = {}
+            docs = await collection.aggregate(pipeline).to_list(length=None)
+            return [doc["filename"] for doc in docs]
 
-            thinking_config = generation_config["thinkingConfig"]
+        except Exception as e:
+            log.error(f"Error getting available credentials list (mode={mode}): {e}")
+            return []
 
-            # 设置思考预算或等级（互斥）
-            if thinking_budget is not None:
-                thinking_config["thinkingBudget"] = thinking_budget
-                thinking_config.pop("thinkingLevel", None)  # 避免与 thinkingBudget 冲突
-            elif thinking_level is not None:
-                thinking_config["thinkingLevel"] = thinking_level
-                thinking_config.pop("thinkingBudget", None)  # 避免与 thinkingLevel 冲突
+    # ============ StorageBackend 协议方法 ============
 
-            if generation_config.get("thinkingConfig", {}).get("includeThoughts") is None:
-                # includeThoughts 逻辑:
-                # 1. 如果是 pro 或 gemini-3 模型，始终为 True
-                base_model = get_base_model_name(model)
-                if "pro" in base_model or "gemini-3" in base_model:
-                    thinking_config["includeThoughts"] = await get_return_thoughts_to_frontend()
-                # 2. 非 pro 或 gemini-3 模型: 有思考预算或等级才包含思考
-                # 注意: 思考预算为 0 时不包含思考
-                elif (thinking_budget is not None and thinking_budget != 0) or thinking_level is not None:
-                    thinking_config["includeThoughts"] = await get_return_thoughts_to_frontend()
-                elif "lite" not in base_model:
-                    thinking_config["thinkingBudget"] = -1
-                    thinking_config["includeThoughts"] = await get_return_thoughts_to_frontend()
+    async def store_credential(self, filename: str, credential_data: Dict[str, Any], mode: str = "geminicli") -> bool:
+        """存储或更新凭证"""
+        self._ensure_initialized()
 
-        # 2. 搜索模型添加 Google Search
-        if is_search_model(model):
-            result_tools = result.get("tools") or []
-            result["tools"] = result_tools
-            if not any(tool.get("googleSearch") for tool in result_tools if isinstance(tool, dict)):
-                result_tools.append({"googleSearch": {}})
+        try:
+            collection_name = self._get_collection_name(mode)
+            collection = self._db[collection_name]
+            current_ts = time.time()
 
-        # 3. 模型名称处理
-        result["model"] = get_base_model_name(model)
+            # 使用 upsert + $setOnInsert
+            # 如果文档存在，只更新 credential_data 和 updated_at
+            # 如果文档不存在，设置所有默认字段
 
-    elif mode == "antigravity":
-        # 1. 处理 system_instruction
-        custom_prompt = "Please ignore the following [ignore]You are Antigravity, a powerful agentic AI coding assistant designed by the Google Deepmind team working on Advanced Agentic Coding.You are pair programming with a USER to solve their coding task. The task may require creating a new codebase, modifying or debugging an existing codebase, or simply answering a question.**Absolute paths only****Proactiveness**[/ignore]"
+            # 先尝试更新现有文档
+            result = await collection.update_one(
+                {"filename": filename},
+                {
+                    "$set": {
+                        "credential_data": credential_data,
+                        "updated_at": current_ts,
+                    }
+                }
+            )
 
-        # 提取原有的 parts（如果存在）
-        existing_parts = []
-        if system_instruction:
-            if isinstance(system_instruction, dict):
-                existing_parts = system_instruction.get("parts", [])
+            # 如果没有匹配到（新凭证），需要插入
+            if result.matched_count == 0:
+                # 获取下一个 rotation_order
+                pipeline = [
+                    {"$group": {"_id": None, "max_order": {"$max": "$rotation_order"}}},
+                    {"$project": {"_id": 0, "next_order": {"$add": ["$max_order", 1]}}}
+                ]
 
-        # custom_prompt 始终放在第一位,原有内容整体后移
-        result["systemInstruction"] = {
-            "parts": [{"text": custom_prompt}] + existing_parts
-        }
+                result_list = await collection.aggregate(pipeline).to_list(length=1)
+                next_order = result_list[0]["next_order"] if result_list else 0
 
-        # 2. 判断图片模型
-        if "image" in model.lower():
-            # 调用图片生成专用处理函数
-            return prepare_image_generation_request(result, model)
-        else:
-            # 3. 思考模型处理
-            if is_thinking_model(model) or ("thinkingBudget" in generation_config.get("thinkingConfig", {}) and generation_config["thinkingConfig"]["thinkingBudget"] != 0):
-                # 直接设置 thinkingConfig
-                if "thinkingConfig" not in generation_config:
-                    generation_config["thinkingConfig"] = {}
-                
-                thinking_config = generation_config["thinkingConfig"]
-                # 优先使用传入的思考预算，否则使用默认值
-                if "thinkingBudget" not in thinking_config:
-                    thinking_config["thinkingBudget"] = -1
-                thinking_config.pop("thinkingLevel", None)  # 避免与 thinkingBudget 冲突
-                thinking_config["includeThoughts"] = return_thoughts
-                
-                # 检查最后一个 assistant 消息是否以 thinking 块开始
-                contents = result.get("contents", [])
-
-                if "claude" in model.lower():
-                    # 检测是否有工具调用（MCP场景）
-                    has_tool_calls = any(
-                        isinstance(content, dict) and 
-                        any(
-                            isinstance(part, dict) and ("functionCall" in part or "function_call" in part)
-                            for part in content.get("parts", [])
+                # 插入新凭证（使用 insert_one，因为我们已经确认不存在）
+                try:
+                    await collection.insert_one({
+                        "filename": filename,
+                        "credential_data": credential_data,
+                        "disabled": False,
+                        "error_codes": [],
+                        "last_success": current_ts,
+                        "user_email": None,
+                        "model_cooldowns": {},
+                        "rotation_order": next_order,
+                        "call_count": 0,
+                        "created_at": current_ts,
+                        "updated_at": current_ts,
+                    })
+                except Exception as insert_error:
+                    # 处理并发插入导致的重复键错误
+                    if "duplicate key" in str(insert_error).lower():
+                        # 重试更新
+                        await collection.update_one(
+                            {"filename": filename},
+                            {"$set": {"credential_data": credential_data, "updated_at": current_ts}}
                         )
-                        for content in contents
-                    )
-                    
-                    if has_tool_calls:
-                        # MCP 场景：检测到工具调用，移除 thinkingConfig
-                        log.warning(f"[ANTIGRAVITY] 检测到工具调用（MCP场景），移除 thinkingConfig 避免失效")
-                        generation_config.pop("thinkingConfig", None)
                     else:
-                        # 非 MCP 场景：填充思考块
-                        # log.warning(f"[ANTIGRAVITY] 最后一个 assistant 消息不以 thinking 块开始，自动填充思考块")
-                        
-                        # 找到最后一个 model 角色的 content
-                        for i in range(len(contents) - 1, -1, -1):
-                            content = contents[i]
-                            if isinstance(content, dict) and content.get("role") == "model":
-                                # 在 parts 开头插入思考块（使用官方跳过验证的虚拟签名）
-                                parts = content.get("parts", [])
-                                # 如果第一个 part 不是 thinking，则插入
-                                if not parts or not (isinstance(parts[0], dict) and ("thought" in parts[0] or "thoughtSignature" in parts[0])):
-                                    content["parts"] = [{
-                                    "text": "...",
-                                    # "thought": True,  # 标记为思考块
-                                    "thoughtSignature": "skip_thought_signature_validator"  # 官方文档推荐的虚拟签名
-                                }] + parts
-                                    log.debug(f"[ANTIGRAVITY] 已在最后一个 assistant 消息开头插入思考块（含跳过验证签名）")
-                                break
-                # 一种尝试修复gemini 3思路签名方法
-                elif "gemini-3" in model:
-                    for c in contents:
-                        if c.get("role") == "model":
-                            p0 = (c.get("parts") or [None])[0]
-                            ts = p0.get("thoughtSignature") if isinstance(p0, dict) else None
-                            if isinstance(p0,dict) and (not isinstance(ts, str) or len(ts) < 56):
-                                p0["thoughtSignature"] = "skip_thought_signature_validator"
-                
-            # 移除 -thinking 后缀
-            model = model.replace("-thinking", "")
+                        raise
 
-            # 4. Claude 模型关键词映射
-            # 使用关键词匹配而不是精确匹配，更灵活地处理各种变体
-            original_model = model
-            if "opus" in model.lower():
-                model = "claude-opus-4-5-thinking"
-            elif "sonnet" in model.lower() or "haiku" in model.lower():
-                model = "claude-sonnet-4-5-thinking"
-            elif "haiku" in model.lower():
-                model = "gemini-2.5-flash"
-            elif "claude" in model.lower():
-                # Claude 模型兜底：如果包含 claude 但不是 opus/sonnet/haiku
-                model = "claude-sonnet-4-5-thinking"
-            # 增加gemini 3预览映射以适应部分软件
-            elif "gemini-3-flash-preview" == model:
-                model = "gemini-3-flash"
-            elif "gemini-3-pro-preview" == model:
-                model = "gemini-3-pro-high"
-            
-            result["model"] = model
-            if original_model != model:
-                log.debug(f"[ANTIGRAVITY] 映射模型: {original_model} -> {model}")
+            log.debug(f"Stored credential: {filename} (mode={mode})")
+            return True
 
-        # 5. 移除 antigravity 模式不支持的字段
-        generation_config.pop("presencePenalty", None)
-        generation_config.pop("frequencyPenalty", None)
+        except Exception as e:
+            log.error(f"Error storing credential {filename}: {e}")
+            return False
 
-    # ========== 公共处理 ==========
+    async def get_credential(self, filename: str, mode: str = "geminicli") -> Optional[Dict[str, Any]]:
+        """获取凭证数据，支持basename匹配以兼容旧数据"""
+        self._ensure_initialized()
 
-    # 1. 安全设置覆盖
-    result["safetySettings"] = DEFAULT_SAFETY_SETTINGS
+        try:
+            collection_name = self._get_collection_name(mode)
+            collection = self._db[collection_name]
 
-    # 2. 参数范围限制
-    if generation_config:
-        # 强制设置 maxOutputTokens 为 64000
-        generation_config["maxOutputTokens"] = 64000
-        # 强制设置 topK 为 64
-        generation_config["topK"] = 64
+            # 首先尝试精确匹配，只投影需要的字段
+            doc = await collection.find_one(
+                {"filename": filename},
+                {"credential_data": 1, "_id": 0}
+            )
+            if doc:
+                return doc.get("credential_data")
 
-    if "contents" in result:
-        cleaned_contents = []
-        for content in result["contents"]:
-            if isinstance(content, dict) and "parts" in content:
-                # 过滤掉空的或无效的 parts
-                valid_parts = []
-                for part in content["parts"]:
-                    if not isinstance(part, dict):
-                        continue
-                    
-                    # 检查 part 是否有有效的非空值
-                    # 过滤掉空字典或所有值都为空的 part
-                    has_valid_value = any(
-                        value not in (None, "", {}, [])
-                        for key, value in part.items()
-                        if key != "thought"  # thought 字段可以为空
-                    )
-                    
-                    if has_valid_value:
-                        part = part.copy()
+            # 如果精确匹配失败，尝试使用basename匹配（处理包含路径的旧数据）
+            # 直接使用 $regex 结尾匹配，移除重复的 $or 条件
+            regex_pattern = re.escape(filename)
+            doc = await collection.find_one(
+                {"filename": {"$regex": f".*{regex_pattern}$"}},
+                {"credential_data": 1, "_id": 0}
+            )
 
-                        # 修复 text 字段：确保是字符串而不是列表
-                        if "text" in part:
-                            text_value = part["text"]
-                            if isinstance(text_value, list):
-                                # 如果是列表，合并为字符串
-                                log.warning(f"[GEMINI_FIX] text 字段是列表，自动合并: {text_value}")
-                                part["text"] = " ".join(str(t) for t in text_value if t)
-                            elif isinstance(text_value, str):
-                                # 清理尾随空格
-                                part["text"] = text_value.rstrip()
-                            else:
-                                # 其他类型转为字符串
-                                log.warning(f"[GEMINI_FIX] text 字段类型异常 ({type(text_value)}), 转为字符串: {text_value}")
-                                part["text"] = str(text_value)
+            if doc:
+                return doc.get("credential_data")
 
-                        valid_parts.append(part)
-                    else:
-                        log.warning(f"[GEMINI_FIX] 移除空的或无效的 part: {part}")
-                
-                # 只添加有有效 parts 的 content
-                if valid_parts:
-                    cleaned_content = content.copy()
-                    cleaned_content["parts"] = valid_parts
-                    cleaned_contents.append(cleaned_content)
-                else:
-                    log.warning(f"[GEMINI_FIX] 跳过没有有效 parts 的 content: {content.get('role')}")
+            return None
+
+        except Exception as e:
+            log.error(f"Error getting credential {filename}: {e}")
+            return None
+
+    async def list_credentials(self, mode: str = "geminicli") -> List[str]:
+        """列出所有凭证文件名"""
+        self._ensure_initialized()
+
+        try:
+            collection_name = self._get_collection_name(mode)
+            collection = self._db[collection_name]
+
+            # 使用聚合管道
+            pipeline = [
+                {"$sort": {"rotation_order": 1}},
+                {"$project": {"filename": 1, "_id": 0}}
+            ]
+
+            docs = await collection.aggregate(pipeline).to_list(length=None)
+            return [doc["filename"] for doc in docs]
+
+        except Exception as e:
+            log.error(f"Error listing credentials: {e}")
+            return []
+
+    async def delete_credential(self, filename: str, mode: str = "geminicli") -> bool:
+        """删除凭证，支持basename匹配以兼容旧数据"""
+        self._ensure_initialized()
+
+        try:
+            collection_name = self._get_collection_name(mode)
+            collection = self._db[collection_name]
+
+            # 首先尝试精确匹配删除
+            result = await collection.delete_one({"filename": filename})
+            deleted_count = result.deleted_count
+
+            # 如果精确匹配没有删除任何记录，尝试basename匹配
+            if deleted_count == 0:
+                regex_pattern = re.escape(filename)
+                result = await collection.delete_one({
+                    "filename": {"$regex": f".*{regex_pattern}$"}
+                })
+                deleted_count = result.deleted_count
+
+            if deleted_count > 0:
+                log.debug(f"Deleted {deleted_count} credential(s): {filename} (mode={mode})")
+                return True
             else:
-                cleaned_contents.append(content)
-        
-        result["contents"] = cleaned_contents
+                log.warning(f"No credential found to delete: {filename} (mode={mode})")
+                return False
 
-    if generation_config:
-        result["generationConfig"] = generation_config
+        except Exception as e:
+            log.error(f"Error deleting credential {filename}: {e}")
+            return False
 
-    return result
+    async def get_duplicate_credentials_by_email(self, mode: str = "geminicli") -> Dict[str, Any]:
+        """
+        获取按邮箱分组的重复凭证信息（只查询邮箱和文件名，不加载完整凭证数据）
+        用于去重操作
+
+        Args:
+            mode: 凭证模式 ("geminicli" 或 "antigravity")
+
+        Returns:
+            包含 email_groups（邮箱分组）、duplicate_count（重复数量）、no_email_count（无邮箱数量）的字典
+        """
+        self._ensure_initialized()
+
+        try:
+            collection_name = self._get_collection_name(mode)
+            collection = self._db[collection_name]
+
+            # 使用聚合管道，只查询 filename 和 user_email 字段
+            pipeline = [
+                {
+                    "$project": {
+                        "filename": 1,
+                        "user_email": 1,
+                        "_id": 0
+                    }
+                },
+                {
+                    "$sort": {"filename": 1}
+                }
+            ]
+
+            docs = await collection.aggregate(pipeline).to_list(length=None)
+
+            # 按邮箱分组
+            email_to_files = {}
+            no_email_files = []
+
+            for doc in docs:
+                filename = doc.get("filename")
+                user_email = doc.get("user_email")
+
+                if user_email:
+                    if user_email not in email_to_files:
+                        email_to_files[user_email] = []
+                    email_to_files[user_email].append(filename)
+                else:
+                    no_email_files.append(filename)
+
+            # 找出重复的邮箱组
+            duplicate_groups = []
+            total_duplicate_count = 0
+
+            for email, files in email_to_files.items():
+                if len(files) > 1:
+                    # 保留第一个文件，其他为重复
+                    duplicate_groups.append({
+                        "email": email,
+                        "kept_file": files[0],
+                        "duplicate_files": files[1:],
+                        "duplicate_count": len(files) - 1,
+                    })
+                    total_duplicate_count += len(files) - 1
+
+            return {
+                "email_groups": email_to_files,
+                "duplicate_groups": duplicate_groups,
+                "duplicate_count": total_duplicate_count,
+                "no_email_files": no_email_files,
+                "no_email_count": len(no_email_files),
+                "unique_email_count": len(email_to_files),
+                "total_count": len(docs),
+            }
+
+        except Exception as e:
+            log.error(f"Error getting duplicate credentials by email: {e}")
+            return {
+                "email_groups": {},
+                "duplicate_groups": [],
+                "duplicate_count": 0,
+                "no_email_files": [],
+                "no_email_count": 0,
+                "unique_email_count": 0,
+                "total_count": 0,
+            }
+
+    async def update_credential_state(
+        self, filename: str, state_updates: Dict[str, Any], mode: str = "geminicli"
+    ) -> bool:
+        """更新凭证状态，支持basename匹配以兼容旧数据"""
+        self._ensure_initialized()
+
+        try:
+            collection_name = self._get_collection_name(mode)
+            collection = self._db[collection_name]
+
+            # 过滤只更新状态字段
+            valid_updates = {
+                k: v for k, v in state_updates.items() if k in self.STATE_FIELDS
+            }
+
+            if not valid_updates:
+                return True
+
+            valid_updates["updated_at"] = time.time()
+
+            # 首先尝试精确匹配更新
+            result = await collection.update_one(
+                {"filename": filename}, {"$set": valid_updates}
+            )
+            updated_count = result.modified_count + result.matched_count
+
+            # 如果精确匹配没有更新任何记录，尝试basename匹配
+            if updated_count == 0:
+                regex_pattern = re.escape(filename)
+                result = await collection.update_one(
+                    {"filename": {"$regex": f".*{regex_pattern}$"}},
+                    {"$set": valid_updates}
+                )
+                updated_count = result.modified_count + result.matched_count
+
+            return updated_count > 0
+
+        except Exception as e:
+            log.error(f"Error updating credential state {filename}: {e}")
+            return False
+
+    async def get_credential_state(self, filename: str, mode: str = "geminicli") -> Dict[str, Any]:
+        """获取凭证状态，支持basename匹配以兼容旧数据"""
+        self._ensure_initialized()
+
+        try:
+            collection_name = self._get_collection_name(mode)
+            collection = self._db[collection_name]
+
+            # 首先尝试精确匹配
+            doc = await collection.find_one({"filename": filename})
+
+            if doc:
+                return {
+                    "disabled": doc.get("disabled", False),
+                    "error_codes": doc.get("error_codes", []),
+                    "last_success": doc.get("last_success", time.time()),
+                    "user_email": doc.get("user_email"),
+                    "model_cooldowns": doc.get("model_cooldowns", {}),
+                }
+
+            # 如果精确匹配失败，尝试basename匹配
+            regex_pattern = re.escape(filename)
+            doc = await collection.find_one({
+                "filename": {"$regex": f".*{regex_pattern}$"}
+            })
+
+            if doc:
+                return {
+                    "disabled": doc.get("disabled", False),
+                    "error_codes": doc.get("error_codes", []),
+                    "last_success": doc.get("last_success", time.time()),
+                    "user_email": doc.get("user_email"),
+                    "model_cooldowns": doc.get("model_cooldowns", {}),
+                }
+
+            # 返回默认状态
+            return {
+                "disabled": False,
+                "error_codes": [],
+                "last_success": time.time(),
+                "user_email": None,
+                "model_cooldowns": {},
+            }
+
+        except Exception as e:
+            log.error(f"Error getting credential state {filename}: {e}")
+            return {}
+
+    async def get_all_credential_states(self, mode: str = "geminicli") -> Dict[str, Dict[str, Any]]:
+        """获取所有凭证状态"""
+        self._ensure_initialized()
+
+        try:
+            collection_name = self._get_collection_name(mode)
+            collection = self._db[collection_name]
+
+            # 使用投影只获取需要的字段
+            cursor = collection.find(
+                {},
+                projection={
+                    "filename": 1,
+                    "disabled": 1,
+                    "error_codes": 1,
+                    "last_success": 1,
+                    "user_email": 1,
+                    "model_cooldowns": 1,
+                    "_id": 0
+                }
+            )
+
+            states = {}
+            current_time = time.time()
+
+            async for doc in cursor:
+                filename = doc["filename"]
+                model_cooldowns = doc.get("model_cooldowns", {})
+
+                # 自动过滤掉已过期的模型CD
+                if model_cooldowns:
+                    model_cooldowns = {
+                        k: v for k, v in model_cooldowns.items()
+                        if v > current_time
+                    }
+
+                states[filename] = {
+                    "disabled": doc.get("disabled", False),
+                    "error_codes": doc.get("error_codes", []),
+                    "last_success": doc.get("last_success", time.time()),
+                    "user_email": doc.get("user_email"),
+                    "model_cooldowns": model_cooldowns,
+                }
+
+            return states
+
+        except Exception as e:
+            log.error(f"Error getting all credential states: {e}")
+            return {}
+
+    async def get_credentials_summary(
+        self,
+        offset: int = 0,
+        limit: Optional[int] = None,
+        status_filter: str = "all",
+        mode: str = "geminicli",
+        error_code_filter: Optional[str] = None,
+        cooldown_filter: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        获取凭证的摘要信息（不包含完整凭证数据）- 支持分页和状态筛选
+
+        Args:
+            offset: 跳过的记录数（默认0）
+            limit: 返回的最大记录数（None表示返回所有）
+            status_filter: 状态筛选（all=全部, enabled=仅启用, disabled=仅禁用）
+            mode: 凭证模式 ("geminicli" 或 "antigravity")
+            error_code_filter: 错误码筛选（格式如"400"或"403"，筛选包含该错误码的凭证）
+            cooldown_filter: 冷却状态筛选（"in_cooldown"=冷却中, "no_cooldown"=未冷却）
+
+        Returns:
+            包含 items（凭证列表）、total（总数）、offset、limit 的字典
+        """
+        self._ensure_initialized()
+
+        try:
+            # 根据 mode 选择集合名
+            collection_name = self._get_collection_name(mode)
+            collection = self._db[collection_name]
+
+            # 构建查询条件
+            query = {}
+            if status_filter == "enabled":
+                query["disabled"] = False
+            elif status_filter == "disabled":
+                query["disabled"] = True
+
+            # 错误码筛选 - 兼容存储为数字或字符串的情况
+            if error_code_filter and str(error_code_filter).strip().lower() != "all":
+                filter_value = str(error_code_filter).strip()
+                query_values = [filter_value]
+                try:
+                    query_values.append(int(filter_value))
+                except ValueError:
+                    pass
+                query["error_codes"] = {"$in": query_values}
+
+            # 计算全局统计数据（不受筛选条件影响）
+            global_stats = {"total": 0, "normal": 0, "disabled": 0}
+            stats_pipeline = [
+                {
+                    "$group": {
+                        "_id": "$disabled",
+                        "count": {"$sum": 1}
+                    }
+                }
+            ]
+
+            stats_result = await collection.aggregate(stats_pipeline).to_list(length=10)
+            for item in stats_result:
+                count = item["count"]
+                global_stats["total"] += count
+                if item["_id"]:
+                    global_stats["disabled"] = count
+                else:
+                    global_stats["normal"] = count
+
+            # 获取所有匹配的文档（用于冷却筛选，因为需要在Python中判断）
+            cursor = collection.find(
+                query,
+                projection={
+                    "filename": 1,
+                    "disabled": 1,
+                    "error_codes": 1,
+                    "last_success": 1,
+                    "user_email": 1,
+                    "rotation_order": 1,
+                    "model_cooldowns": 1,
+                    "_id": 0
+                }
+            ).sort("rotation_order", 1)
+
+            all_summaries = []
+            current_time = time.time()
+
+            async for doc in cursor:
+                model_cooldowns = doc.get("model_cooldowns", {})
+
+                # 自动过滤掉已过期的模型CD
+                active_cooldowns = {}
+                current_time = time.time()
+
+                if isinstance(model_cooldowns, dict):
+                    # 定义一个简单的打平逻辑
+                    def flatten_cooldowns(d, parent_key=''):
+                        items = []
+                        for k, v in d.items():
+                            new_key = f"{parent_key}.{k}" if parent_key else k
+                            if isinstance(v, dict):
+                                items.extend(flatten_cooldowns(v, new_key).items())
+                            else:
+                                items.append((new_key, v))
+                        return dict(items)
+
+                    # 处理可能被 MongoDB 自动嵌套的数据
+                    flat_cooldowns = flatten_cooldowns(model_cooldowns)
+                    
+                    for model_name, ts in flat_cooldowns.items():
+                        try:
+                            if isinstance(ts, (int, float)) and ts > current_time:
+                                active_cooldowns[model_name] = ts
+                        except:
+                            continue
+
+                summary = {
+                    "filename": doc["filename"],
+                    "disabled": doc.get("disabled", False),
+                    "error_codes": doc.get("error_codes", []),
+                    "last_success": doc.get("last_success", current_time),
+                    "user_email": doc.get("user_email"),
+                    "rotation_order": doc.get("rotation_order", 0),
+                    "model_cooldowns": active_cooldowns,
+                }
+
+                # 应用冷却筛选
+                if cooldown_filter == "in_cooldown":
+                    # 只保留有冷却的凭证
+                    if active_cooldowns:
+                        all_summaries.append(summary)
+                elif cooldown_filter == "no_cooldown":
+                    # 只保留没有冷却的凭证
+                    if not active_cooldowns:
+                        all_summaries.append(summary)
+                else:
+                    # 不筛选冷却状态
+                    all_summaries.append(summary)
+
+            # 应用分页
+            total_count = len(all_summaries)
+            if limit is not None:
+                summaries = all_summaries[offset:offset + limit]
+            else:
+                summaries = all_summaries[offset:]
+
+            return {
+                "items": summaries,
+                "total": total_count,
+                "offset": offset,
+                "limit": limit,
+                "stats": global_stats,
+            }
+
+        except Exception as e:
+            log.error(f"Error getting credentials summary: {e}")
+            return {
+                "items": [],
+                "total": 0,
+                "offset": offset,
+                "limit": limit,
+                "stats": {"total": 0, "normal": 0, "disabled": 0},
+            }
+
+    # ============ 配置管理（内存缓存）============
+
+    async def set_config(self, key: str, value: Any) -> bool:
+        """设置配置（写入数据库 + 更新内存缓存）"""
+        self._ensure_initialized()
+
+        try:
+            config_collection = self._db["config"]
+            await config_collection.update_one(
+                {"key": key},
+                {"$set": {"value": value, "updated_at": time.time()}},
+                upsert=True,
+            )
+
+            # 更新内存缓存
+            self._config_cache[key] = value
+            return True
+
+        except Exception as e:
+            log.error(f"Error setting config {key}: {e}")
+            return False
+
+    async def reload_config_cache(self):
+        """重新加载配置缓存（在批量修改配置后调用）"""
+        self._ensure_initialized()
+        self._config_loaded = False
+        await self._load_config_cache()
+        log.info("Config cache reloaded from database")
+
+    async def get_config(self, key: str, default: Any = None) -> Any:
+        """获取配置（从内存缓存）"""
+        self._ensure_initialized()
+        return self._config_cache.get(key, default)
+
+    async def get_all_config(self) -> Dict[str, Any]:
+        """获取所有配置（从内存缓存）"""
+        self._ensure_initialized()
+        return self._config_cache.copy()
+
+    async def delete_config(self, key: str) -> bool:
+        """删除配置"""
+        self._ensure_initialized()
+
+        try:
+            config_collection = self._db["config"]
+            result = await config_collection.delete_one({"key": key})
+
+            # 从内存缓存移除
+            self._config_cache.pop(key, None)
+            return result.deleted_count > 0
+
+        except Exception as e:
+            log.error(f"Error deleting config {key}: {e}")
+            return False
+
+    # ============ 模型级冷却管理 ============
+
+    async def set_model_cooldown(
+        self,
+        filename: str,
+        model_key: str,
+        cooldown_until: Optional[float],
+        mode: str = "geminicli"
+    ) -> bool:
+        """
+        设置特定模型的冷却时间
+
+        Args:
+            filename: 凭证文件名
+            model_key: 模型键（antigravity 用模型名，gcli 用 pro/flash）
+            cooldown_until: 冷却截止时间戳（None 表示清除冷却）
+            mode: 凭证模式 ("geminicli" 或 "antigravity")
+
+        Returns:
+            是否成功
+        """
+        self._ensure_initialized()
+
+        try:
+            collection_name = self._get_collection_name(mode)
+            collection = self._db[collection_name]
+
+            # 使用原子操作直接更新，避免竞态条件
+            if cooldown_until is None:
+                # 删除指定模型的冷却
+                result = await collection.update_one(
+                    {"filename": filename},
+                    {
+                        "$unset": {f"model_cooldowns.{model_key}": ""},
+                        "$set": {"updated_at": time.time()}
+                    }
+                )
+            else:
+                # 设置冷却时间
+                result = await collection.update_one(
+                    {"filename": filename},
+                    {
+                        "$set": {
+                            f"model_cooldowns.{model_key}": cooldown_until,
+                            "updated_at": time.time()
+                        }
+                    }
+                )
+
+            if result.matched_count == 0:
+                log.warning(f"Credential {filename} not found")
+                return False
+
+            log.debug(f"Set model cooldown: {filename}, model_key={model_key}, cooldown_until={cooldown_until}")
+            return True
+
+        except Exception as e:
+            log.error(f"Error setting model cooldown for {filename}: {e}")
+            return False
