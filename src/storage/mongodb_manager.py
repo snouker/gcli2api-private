@@ -707,11 +707,29 @@ class MongoDBManager:
 
                 # 自动过滤掉已过期的模型CD
                 active_cooldowns = {}
-                if model_cooldowns:
-                    active_cooldowns = {
-                        k: v for k, v in model_cooldowns.items()
-                        if v > current_time
-                    }
+                current_time = time.time()
+
+                if isinstance(model_cooldowns, dict):
+                    # 定义一个简单的打平逻辑
+                    def flatten_cooldowns(d, parent_key=''):
+                        items = []
+                        for k, v in d.items():
+                            new_key = f"{parent_key}.{k}" if parent_key else k
+                            if isinstance(v, dict):
+                                items.extend(flatten_cooldowns(v, new_key).items())
+                            else:
+                                items.append((new_key, v))
+                        return dict(items)
+
+                    # 处理可能被 MongoDB 自动嵌套的数据
+                    flat_cooldowns = flatten_cooldowns(model_cooldowns)
+                    
+                    for model_name, ts in flat_cooldowns.items():
+                        try:
+                            if isinstance(ts, (int, float)) and ts > current_time:
+                                active_cooldowns[model_name] = ts
+                        except:
+                            continue
 
                 summary = {
                     "filename": doc["filename"],
