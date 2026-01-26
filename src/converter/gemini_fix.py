@@ -280,10 +280,13 @@ async def normalize_gemini_request(
                 
                 thinking_config = generation_config["thinkingConfig"]
                 # 优先使用传入的思考预算，否则使用默认值
-                if "thinkingBudget" not in thinking_config:
+                if "thinkingBudget" not in thinking_config and "thinkingLevel" not in thinking_config:
                     thinking_config["thinkingBudget"] = -1
-                thinking_config.pop("thinkingLevel", None)  # 避免与 thinkingBudget 冲突
-                thinking_config["includeThoughts"] = return_thoughts
+                elif "thinkingBudget" in thinking_config:
+                    thinking_config.pop("thinkingLevel", None)
+                else:
+                    thinking_config.pop("thinkingBudget", None)
+                thinking_config["includeThoughts"] = generation_config.get("thinkingConfig",{}).get("includeThoughts") or await get_return_thoughts_to_frontend()
                 
                 # 检查最后一个 assistant 消息是否以 thinking 块开始
                 contents = result.get("contents", [])
