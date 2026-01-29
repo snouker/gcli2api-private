@@ -5,6 +5,7 @@ Antigravity API Client - Handles communication with Google's Antigravity API
 
 import asyncio
 import json
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -585,6 +586,8 @@ async def non_stream_request(
     return last_error_response
 
 
+model_list:List[Dict[str, Any]] = []
+cache_out_time:float = 0
 # ==================== 模型和配额查询 ====================
 
 async def fetch_available_models() -> List[Dict[str, Any]]:
@@ -597,6 +600,11 @@ async def fetch_available_models() -> List[Dict[str, Any]]:
     Raises:
         返回空列表如果获取失败
     """
+    global cache_out_time
+    global model_list
+    if time.time() < cache_out_time and model_list:
+        return model_list
+
     # 获取凭证管理器和可用凭证
     cred_result = await credential_manager.get_valid_credential(mode="antigravity")
     if not cred_result:
@@ -650,8 +658,8 @@ async def fetch_available_models() -> List[Dict[str, Any]]:
                 owned_by='google'
             )
             model_list.append(model_to_dict(claude_opus_model))
-
-            log.info(f"[ANTIGRAVITY] Fetched {len(model_list)} available models")
+            cache_out_time = time.time() + 600
+            log.info(f"[ANTIGRAVITY] Fetched {len(model_list)} available models and cached 10 mins")
             return model_list
         else:
             log.error(f"[ANTIGRAVITY] Failed to fetch models ({response.status_code}): {response.text[:500]}")

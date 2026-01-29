@@ -228,26 +228,19 @@ async def normalize_gemini_request(
                 thinking_config["thinkingLevel"] = thinking_level
                 thinking_config.pop("thinkingBudget", None)  # 避免与 thinkingLevel 冲突
 
-            # includeThoughts 逻辑:
-            # 1. 如果是 pro 模型，为 return_thoughts
-            # 2. 如果不是 pro 模型，检查是否有思考预算或思考等级
-            base_model = get_base_model_name(model)
-            if "pro" in base_model:
-                include_thoughts = return_thoughts
-            elif "3-flash" in base_model:
-                if thinking_level is None:
-                    include_thoughts = False
-                else:
-                    include_thoughts = return_thoughts
-            else:
-                # 非 pro 模型: 有思考预算或等级才包含思考
+            if generation_config.get("thinkingConfig", {}).get("includeThoughts") is None:
+                # includeThoughts 逻辑:
+                # 1. 如果是 pro 或 gemini-3 模型，始终为 True
+                base_model = get_base_model_name(model)
+                if "pro" in base_model or "gemini-3" in base_model:
+                    thinking_config["includeThoughts"] = await get_return_thoughts_to_frontend()
+                # 2. 非 pro 或 gemini-3 模型: 有思考预算或等级才包含思考
                 # 注意: 思考预算为 0 时不包含思考
-                if thinking_budget is None or thinking_budget == 0:
-                    include_thoughts = False
-                else:
-                    include_thoughts = return_thoughts
-
-            thinking_config["includeThoughts"] = include_thoughts
+                elif (thinking_budget is not None and thinking_budget != 0) or thinking_level is not None:
+                    thinking_config["includeThoughts"] = await get_return_thoughts_to_frontend()
+                elif "lite" not in base_model:
+                    thinking_config["thinkingBudget"] = -1
+                    thinking_config["includeThoughts"] = await get_return_thoughts_to_frontend()
 
         # 2. 搜索模型添加 Google Search
         if is_search_model(model):
@@ -280,17 +273,21 @@ async def normalize_gemini_request(
             return prepare_image_generation_request(result, model)
         else:
             # 3. 思考模型处理
-            if is_thinking_model(model) or ("thinkingBudget" in generation_config.get("thinkingConfig", {}) and generation_config["thinkingConfig"]["thinkingBudget"] != 0):
+            if is_thinking_model(model) or "thinkingLevel" in generation_config.get("thinkingConfig", {}) or ("thinkingBudget" in generation_config.get("thinkingConfig", {}) and generation_config["thinkingConfig"]["thinkingBudget"] != 0):
                 # 直接设置 thinkingConfig
                 if "thinkingConfig" not in generation_config:
                     generation_config["thinkingConfig"] = {}
                 
                 thinking_config = generation_config["thinkingConfig"]
-                # 优先使用传入的思考预算，否则使用默认值
+                # 优先使用传入的思考，否则使用默认值
+                if "thinkingLevel" in thinking_config:
+                    thinking_config["thinkingLevel"] = thinking_config["thinkingLevel"]
+                    thinking_config.pop("thinkingBudget", None)
                 if "thinkingBudget" not in thinking_config:
-                    thinking_config["thinkingBudget"] = 1024
-                thinking_config.pop("thinkingLevel", None)  # 避免与 thinkingBudget 冲突
-                thinking_config["includeThoughts"] = return_thoughts
+                    thinking_config["thinkingBudget"] = -1
+                    thinking_config.pop("thinkingLevel", None)  # 避免与 thinkingBudget 冲突
+
+                thinking_config["includeThoughts"] = generation_config["thinkingConfig"].get("includeThoughts") or await get_return_thoughts_to_frontend()
                 
                 # 检查最后一个 assistant 消息是否以 thinking 块开始
                 contents = result.get("contents", [])
@@ -335,7 +332,7 @@ async def normalize_gemini_request(
                         if c.get("role") == "model":
                             p0 = (c.get("parts") or [None])[0]
                             ts = p0.get("thoughtSignature") if isinstance(p0, dict) else None
-                            if not isinstance(ts, str) or len(ts) < 56:
+                            if isinstance(p0,dict) and (not isinstance(ts, str) or len(ts) < 56):
                                 p0["thoughtSignature"] = "skip_thought_signature_validator"
                 
             # 移除 -thinking 后缀
