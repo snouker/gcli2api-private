@@ -372,9 +372,9 @@ async def normalize_gemini_request(
     # 2. 参数范围限制
     if generation_config:
         # 强制设置 maxOutputTokens 为 64000
-        generation_config["maxOutputTokens"] = 64000
+        generation_config["maxOutputTokens"] = max(0, min(64000, generation_config.get("maxOutputTokens", 0)))
         # 强制设置 topK 为 64
-        generation_config["topK"] = 64
+        generation_config["topK"] = max(0, min(64, generation_config.get("topK", 0)))
 
     if "contents" in result:
         cleaned_contents = []
