@@ -94,7 +94,7 @@ async def stream_request(
 
     # 1. 获取有效凭证
     cred_result = await credential_manager.get_valid_credential(
-        mode="antigravity", model_key=model_name
+        mode="antigravity", model_name=model_name
     )
 
     if not cred_result:
@@ -150,7 +150,7 @@ async def stream_request(
     async def refresh_credential_fast():
         nonlocal current_file, access_token, auth_headers, project_id, final_payload
         cred_result = await credential_manager.get_valid_credential(
-            mode="antigravity", model_key=model_name
+            mode="antigravity", model_name=model_name
         )
         if not cred_result:
             return None
@@ -195,7 +195,7 @@ async def stream_request(
                         if next_cred_task is None and attempt < max_retries:
                             next_cred_task = asyncio.create_task(
                                 credential_manager.get_valid_credential(
-                                    mode="antigravity", model_key=model_name
+                                    mode="antigravity", model_name=model_name
                                 )
                             )
 
@@ -210,7 +210,7 @@ async def stream_request(
 
                         await record_api_call_error(
                             credential_manager, current_file, status_code,
-                            cooldown_until, mode="antigravity", model_key=model_name,
+                            cooldown_until, mode="antigravity", model_name=model_name,
                             error_message=error_body
                         )
 
@@ -234,7 +234,7 @@ async def stream_request(
                         log.error(f"[ANTIGRAVITY STREAM] 流式请求失败，非重试错误码 (status={status_code}), 凭证: {current_file}, 响应: {error_body[:500] if error_body else '无'}")
                         await record_api_call_error(
                             credential_manager, current_file, status_code,
-                            None, mode="antigravity", model_key=model_name,
+                            None, mode="antigravity", model_name=model_name,
                             error_message=error_body
                         )
                         yield chunk
@@ -244,7 +244,7 @@ async def stream_request(
                     # 只在第一个chunk时记录成功
                     if not success_recorded:
                         await record_api_call_success(
-                            credential_manager, current_file, mode="antigravity", model_key=model_name
+                            credential_manager, current_file, mode="antigravity", model_name=model_name
                         )
                         success_recorded = True
                         log.debug(f"[ANTIGRAVITY STREAM] 开始接收流式响应，模型: {model_name}")
@@ -266,7 +266,7 @@ async def stream_request(
                 log.warning(f"[ANTIGRAVITY STREAM] 收到空回复，无任何内容，凭证: {current_file}")
                 await record_api_call_error(
                     credential_manager, current_file, 200,
-                    None, mode="antigravity", model_key=model_name,
+                    None, mode="antigravity", model_name=model_name,
                     error_message="Empty response from API"
                 )
                 
@@ -362,7 +362,7 @@ async def non_stream_request(
 
     # 1. 获取有效凭证
     cred_result = await credential_manager.get_valid_credential(
-        mode="antigravity", model_key=model_name
+        mode="antigravity", model_name=model_name
     )
 
     if not cred_result:
@@ -416,7 +416,7 @@ async def non_stream_request(
     async def refresh_credential_fast():
         nonlocal current_file, access_token, auth_headers, project_id, final_payload
         cred_result = await credential_manager.get_valid_credential(
-            mode="antigravity", model_key=model_name
+            mode="antigravity", model_name=model_name
         )
         if not cred_result:
             return None
@@ -452,7 +452,7 @@ async def non_stream_request(
                     # 记录错误
                     await record_api_call_error(
                         credential_manager, current_file, 200,
-                        None, mode="antigravity", model_key=model_name,
+                        None, mode="antigravity", model_name=model_name,
                         error_message="Empty response from API"
                     )
                     
@@ -468,7 +468,7 @@ async def non_stream_request(
                 else:
                     # 正常响应
                     await record_api_call_success(
-                        credential_manager, current_file, mode="antigravity", model_key=model_name
+                        credential_manager, current_file, mode="antigravity", model_name=model_name
                     )
                     return Response(
                         content=response.content,
@@ -499,7 +499,7 @@ async def non_stream_request(
                     if next_cred_task is None and attempt < max_retries:
                         next_cred_task = asyncio.create_task(
                             credential_manager.get_valid_credential(
-                                mode="antigravity", model_key=model_name
+                                mode="antigravity", model_name=model_name
                             )
                         )
 
@@ -514,7 +514,7 @@ async def non_stream_request(
 
                     await record_api_call_error(
                         credential_manager, current_file, status_code,
-                        cooldown_until, mode="antigravity", model_key=model_name,
+                        cooldown_until, mode="antigravity", model_name=model_name,
                         error_message=error_text
                     )
 
@@ -536,7 +536,7 @@ async def non_stream_request(
                     log.error(f"[ANTIGRAVITY] 非流式请求失败，非重试错误码 (status={status_code}), 凭证: {current_file}, 响应: {error_text[:500] if error_text else '无'}")
                     await record_api_call_error(
                         credential_manager, current_file, status_code,
-                        None, mode="antigravity", model_key=model_name,
+                        None, mode="antigravity", model_name=model_name,
                         error_message=error_text
                     )
                     return last_error_response

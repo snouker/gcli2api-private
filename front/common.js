@@ -57,6 +57,7 @@ function createCredsManager(type) {
         currentStatusFilter: 'all',
         currentErrorCodeFilter: 'all',
         currentCooldownFilter: 'all',
+        currentPreviewFilter: 'all',
         statsData: { total: 0, normal: 0, disabled: 0 },
 
         // API端点
@@ -102,8 +103,9 @@ function createCredsManager(type) {
                 const offset = (this.currentPage - 1) * this.pageSize;
                 const errorCodeFilter = this.currentErrorCodeFilter || 'all';
                 const cooldownFilter = this.currentCooldownFilter || 'all';
+                const previewFilter = this.currentPreviewFilter || 'all';
                 const response = await fetch(
-                    `${this.getEndpoint('status')}?offset=${offset}&limit=${this.pageSize}&status_filter=${this.currentStatusFilter}&error_code_filter=${errorCodeFilter}&cooldown_filter=${cooldownFilter}&${this.getModeParam()}`,
+                    `${this.getEndpoint('status')}?offset=${offset}&limit=${this.pageSize}&status_filter=${this.currentStatusFilter}&error_code_filter=${errorCodeFilter}&cooldown_filter=${cooldownFilter}&preview_filter=${previewFilter}&${this.getModeParam()}`,
                     { headers: getAuthHeaders() }
                 );
 
@@ -120,7 +122,8 @@ function createCredsManager(type) {
                                 last_success: item.last_success,
                             },
                             user_email: item.user_email,
-                            model_cooldowns: item.model_cooldowns || {}
+                            model_cooldowns: item.model_cooldowns || {},
+                            preview: item.preview  // 保存preview字段
                         };
                     });
 
@@ -233,8 +236,10 @@ function createCredsManager(type) {
             this.currentStatusFilter = document.getElementById(this.getElementId('StatusFilter')).value;
             const errorCodeFilterEl = document.getElementById(this.getElementId('ErrorCodeFilter'));
             const cooldownFilterEl = document.getElementById(this.getElementId('CooldownFilter'));
+            const previewFilterEl = document.getElementById(this.getElementId('PreviewFilter'));
             this.currentErrorCodeFilter = errorCodeFilterEl ? errorCodeFilterEl.value : 'all';
             this.currentCooldownFilter = cooldownFilterEl ? cooldownFilterEl.value : 'all';
+            this.currentPreviewFilter = previewFilterEl ? previewFilterEl.value : 'all';
             this.currentPage = 1;
             this.refresh();
         },
@@ -571,6 +576,15 @@ function createCredCard(credInfo, manager) {
         }
     } else {
         statusBadges += '<span class="status-badge" style="background-color: #28a745; color: white;">无错误</span>';
+    }
+
+    // Preview状态显示 (仅对geminicli模式显示)
+    if (managerType !== 'antigravity' && credInfo.preview !== undefined) {
+        if (credInfo.preview) {
+            statusBadges += '<span class="status-badge" style="background-color: #9c27b0; color: white;" title="该凭证支持Preview模型">🔬 Preview</span>';
+        } else {
+            statusBadges += '<span class="status-badge" style="background-color: #607d8b; color: white;" title="该凭证不支持Preview模型">❌ Preview</span>';
+        }
     }
 
     // 模型级冷却状态
@@ -1778,7 +1792,7 @@ async function toggleErrorDetailsCommon(pathId, manager) {
 
                 if (response.ok) {
                     const errorCodes = data.error_codes || [];
-                    const errorMessagesArray = data.error_messages || [];
+                    const errorMessages = data.error_messages || {};
 
                     if (errorCodes.length === 0) {
                         contentDiv.innerHTML = `
@@ -1791,13 +1805,15 @@ async function toggleErrorDetailsCommon(pathId, manager) {
                     } else {
                         let errorHTML = '';
 
-                        // 遍历所有错误消息
-                        errorMessagesArray.forEach((msgObj) => {
+                        // 遍历所有错误码，从 errorMessages 对象中获取对应消息
+                        errorCodes.forEach((errorCode) => {
+                            const messageStr = errorMessages[errorCode] || '无详细信息';
+
                             // 提取核心错误消息
-                            let displayMsg = msgObj.message;
+                            let displayMsg = messageStr;
                             try {
                                 // 尝试解析 JSON 格式的 message
-                                const parsedMsg = JSON.parse(msgObj.message);
+                                const parsedMsg = JSON.parse(messageStr);
                                 if (parsedMsg.error && parsedMsg.error.message) {
                                     // 只显示 error.message 中的核心错误信息
                                     displayMsg = parsedMsg.error.message;
@@ -1810,8 +1826,11 @@ async function toggleErrorDetailsCommon(pathId, manager) {
                             const highlightedMsg = highlightHttpLinks(escapeHtml(displayMsg));
 
                             errorHTML += `
-                                <div style="padding: 12px; margin-bottom: 10px; line-height: 1.6; color: #333; white-space: pre-wrap; word-break: break-word;">
-                                    ${highlightedMsg}
+                                <div style="padding: 12px; margin-bottom: 10px; border-left: 3px solid #dc3545; background-color: #f8f9fa;">
+                                    <div style="font-weight: bold; color: #dc3545; margin-bottom: 8px;">错误码: ${errorCode}</div>
+                                    <div style="line-height: 1.6; color: #333; white-space: pre-wrap; word-break: break-word;">
+                                        ${highlightedMsg}
+                                    </div>
                                 </div>
                             `;
                         });
