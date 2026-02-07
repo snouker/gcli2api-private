@@ -1,4 +1,4 @@
-full_hash=030ea235f696ba0a2f215d8da8feb632d7c24957
-short_hash=030ea23
-message=修改所有数据库操作，确保始终使用 basename 进行存储和查询
-date=2026-02-03 22:17:12 +0800
+full_hash=d6901222482bb49fc28952a5dbc5c01c16dfb067
+short_hash=d690122
+message=Update antigravity.py
+date=2026-02-07 12:18:06 +0800
