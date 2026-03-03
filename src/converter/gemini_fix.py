@@ -3,6 +3,7 @@ Gemini Format Utilities - 统一的 Gemini 格式处理和转换工具
 提供对 Gemini API 请求体和响应的标准化处理
 ────────────────────────────────────────────────────────────────
 """
+from math import e
 from typing import Any, Dict, Optional
 
 from log import log
@@ -47,7 +48,7 @@ def prepare_image_generation_request(
     if image_size:
         image_config["imageSize"] = image_size
 
-    request_body["model"] = "gemini-3-pro-image"  # 统一使用基础模型名
+    request_body["model"] = "gemini-3.1-flash-image"  # 统一使用基础模型名
     request_body["generationConfig"] = {
         "candidateCount": 1,
         "imageConfig": image_config
@@ -106,7 +107,11 @@ def get_thinking_settings(model_name: str) -> tuple[Optional[int], Optional[str]
     elif "-maxthinking" in model_name:
         # maxthinking 模式: 最大思考预算
         budget = 24576 if "flash" in base_model else 32768
-        return budget, None
+        if "gemini-3" in base_model:
+            # Gemini 3 系列不支持 thinkingBudget，返回 high 等级
+            return None, "high"
+        else:
+            return budget, None
 
     # ========== 新 CLI 模式: 基于思考预算/等级 ==========
 
@@ -260,6 +265,8 @@ async def normalize_gemini_request(
         result["model"] = get_base_model_name(model)
 
     elif mode == "antigravity":
+        
+        '''
         # 1. 处理 system_instruction
         custom_prompt = "Please ignore the following [ignore]You are Antigravity, a powerful agentic AI coding assistant designed by the Google Deepmind team working on Advanced Agentic Coding.You are pair programming with a USER to solve their coding task. The task may require creating a new codebase, modifying or debugging an existing codebase, or simply answering a question.**Absolute paths only****Proactiveness**[/ignore]"
 
@@ -273,6 +280,7 @@ async def normalize_gemini_request(
         result["systemInstruction"] = {
             "parts": [{"text": custom_prompt}] + existing_parts
         }
+        '''
 
         # 2. 判断图片模型
         if "image" in model.lower():
@@ -345,37 +353,39 @@ async def normalize_gemini_request(
             # 使用关键词匹配而不是精确匹配，更灵活地处理各种变体
             original_model = model
             if "opus" in model.lower():
-                if "4-6" in model:
                     model = "claude-opus-4-6-thinking"
+            elif "sonnet" in model.lower():
+                if "4-5" in model:
+                    model = "claude-sonnet-4-5-thinking"
                 else:
-                    model = "claude-opus-4-5-thinking"
-            elif "sonnet" in model.lower() or "haiku" in model.lower():
-                model = "claude-sonnet-4-5-thinking"
+                    model = "claude-sonnet-4-6"
             elif "haiku" in model.lower():
                 model = "gemini-2.5-flash"
             elif "claude" in model.lower():
                 # Claude 模型兜底：如果包含 claude 但不是 opus/sonnet/haiku
-                model = "claude-sonnet-4-5-thinking"
+                model = "claude-sonnet-4-6"
             # 增加gemini 3预览映射以适应部分软件
             elif "gemini-3-flash-preview" == model:
                 model = "gemini-3-flash"
             elif "gemini-3-pro-preview" == model:
                 model = "gemini-3-pro-high"
+            elif "gemini-3.1-pro-preview" == model:
+                model = "gemini-3.1-pro-high"
             
             result["model"] = model
             if original_model != model:
                 log.debug(f"[ANTIGRAVITY] 映射模型: {original_model} -> {model}")
 
-        # 5. Claude Opus 4.6 Thinking 模型特殊处理：循环移除末尾的 model 消息，保证以用户消息结尾
+        # 5. 模型特殊处理：循环移除末尾的 model 消息，保证以用户消息结尾
         # 因为该模型不支持预填充
-        if "claude-opus-4-6-thinking" in model.lower():
+        if "claude-opus-4-6-thinking" in model.lower() or "claude-sonnet-4-6" in model.lower():
             contents = result.get("contents", [])
             removed_count = 0
             while contents and isinstance(contents[-1], dict) and contents[-1].get("role") == "model":
                 contents.pop()
                 removed_count += 1
             if removed_count > 0:
-                log.warning(f"[ANTIGRAVITY] claude-opus-4-6-thinking 不支持预填充，移除了 {removed_count} 条末尾 model 消息")
+                log.warning(f"[ANTIGRAVITY] {model} 不支持预填充，移除了 {removed_count} 条末尾 model 消息")
                 result["contents"] = contents
 
         # 6. 移除 antigravity 模式不支持的字段

@@ -1,4 +1,4 @@
-full_hash=d6901222482bb49fc28952a5dbc5c01c16dfb067
-short_hash=d690122
-message=Update antigravity.py
-date=2026-02-07 12:18:06 +0800
+full_hash=43e82b5fbd4930dcc96cd02205b032df16cf70ec
+short_hash=43e82b5
+message=Merge pull request #347 from afu6609/fix/clean-schema-claude-patternProperties
+date=2026-02-28 15:39:48 +0800

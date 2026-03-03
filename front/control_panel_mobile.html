@@ -805,6 +805,7 @@
             from {
                 opacity: 0;
             }
+
             to {
                 opacity: 1;
             }
@@ -827,6 +828,7 @@
                 transform: translateY(-50px);
                 opacity: 0;
             }
+
             to {
                 transform: translateY(0);
                 opacity: 1;
@@ -1761,29 +1763,29 @@
                         </div>
 
                         <div class="card">
-                            <h4 style="margin-top: 0; margin-bottom: 15px;">429重试配置</h4>
+                            <h4 style="margin-top: 0; margin-bottom: 15px;">错误重试配置</h4>
 
                             <div class="form-group">
                                 <label style="display: flex; align-items: center; cursor: pointer;">
                                     <input type="checkbox" id="retry429Enabled" style="margin-right: 8px;" />
-                                    启用429重试
+                                    启用错误重试
                                 </label>
                                 <small
-                                    style="display: block; color: #666; font-size: 12px; margin-top: 5px;">遇到429错误时自动重试</small>
+                                    style="display: block; color: #666; font-size: 12px; margin-top: 5px;">遇到错误时自动重试</small>
                             </div>
 
                             <div class="form-group">
-                                <label for="retry429MaxRetries">429重试次数:</label>
+                                <label for="retry429MaxRetries">错误重试次数:</label>
                                 <input type="number" id="retry429MaxRetries" min="1" max="50" />
                                 <small
-                                    style="display: block; color: #666; font-size: 12px; margin-top: 5px;">遇到429错误时的最大重试次数</small>
+                                    style="display: block; color: #666; font-size: 12px; margin-top: 5px;">遇到错误时的最大重试次数</small>
                             </div>
 
                             <div class="form-group">
-                                <label for="retry429Interval">429重试间隔(秒):</label>
+                                <label for="retry429Interval">错误重试间隔(秒):</label>
                                 <input type="number" id="retry429Interval" min="0.01" max="10" step="0.01" />
                                 <small
-                                    style="display: block; color: #666; font-size: 12px; margin-top: 5px;">遇到429错误时每两次重试间的等待时间</small>
+                                    style="display: block; color: #666; font-size: 12px; margin-top: 5px;">遇到错误时每两次重试间的等待时间</small>
                             </div>
                         </div>
 
@@ -1834,7 +1836,8 @@
                                     <span style="color: #28a745;">✓ 支持热更新</span></small>
                                 <div
                                     style="background-color: #f3e5f5; border: 1px solid #9c27b0; border-radius: 6px; padding: 12px; margin-top: 8px; font-size: 13px; color: #4a148c;">
-                                    <strong>🔄 说明：</strong>针对Antigravity模式的优化选项。启用后，即使客户端请求非流式响应，后端也会使用流式API获取数据并收集完整后再返回。
+                                    <strong>🔄
+                                        说明：</strong>针对Antigravity模式的优化选项。启用后，即使客户端请求非流式响应，后端也会使用流式API获取数据并收集完整后再返回。
                                     <br><strong>适用场景：</strong>某些情况下流式API比非流式API更稳定，启用此选项可以提高响应质量。
                                     <br><strong>默认：</strong>已启用
                                 </div>
@@ -1859,6 +1862,23 @@
                                     <li>该功能仅在流式传输时生效</li>
                                     <li>例如: "gemini-2.5-pro-流式抗截断"</li>
                                 </ul>
+                            </div>
+                        </div>
+
+                        <div class="card">
+                            <h4 style="margin-top: 0; margin-bottom: 15px;">保活配置</h4>
+
+                            <div class="form-group">
+                                <label for="keepaliveUrl">保活 URL:</label>
+                                <input type="text" id="keepaliveUrl"
+                                    placeholder="留空则不启用，例如: https://your-app.example.com/keepalive" />
+                                <small style="display: block; color: #666; font-size: 12px; margin-top: 5px;">配置后服务会定期向该 URL 发送 GET 请求以保持在线；留空则禁用保活 ✓ 支持热更新</small>
+                            </div>
+
+                            <div class="form-group">
+                                <label for="keepaliveInterval">保活间隔 (秒):</label>
+                                <input type="number" id="keepaliveInterval" min="5" max="86400" />
+                                <small style="display: block; color: #666; font-size: 12px; margin-top: 5px;">两次保活请求之间的等待时间，范围 5 - 86400 秒，默认 60 ✓ 支持热更新</small>
                             </div>
                         </div>
 
