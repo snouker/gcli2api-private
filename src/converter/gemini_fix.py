@@ -931,6 +931,17 @@ async def normalize_gemini_request(
                 if original_model != model:
                     log.debug(f"[ANTIGRAVITY] 映射模型: {original_model} -> {model}")
 
+            # 增加gemini 3预览映射以适应部分软件
+            original_model = model
+            if "gemini-3-flash-preview" == model:
+                model = "gemini-3-flash"
+            elif "gemini-3-pro-preview" == model:
+                model = "gemini-3-pro-high"
+            
+            if original_model != model:
+                result["model"] = model
+                log.debug(f"[ANTIGRAVITY] 映射模型: {original_model} -> {model}")
+
         # 5. 模型特殊处理：循环移除末尾的 model 消息，保证以用户消息结尾
         # 因为该模型不支持预填充
         if "claude-opus-4-6-thinking" in model.lower() or "claude-sonnet-4-6" in model.lower():
