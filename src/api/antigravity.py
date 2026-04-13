@@ -672,6 +672,8 @@ async def non_stream_request(
 
 
 # ==================== 模型和配额查询 ====================
+model_list:List[Dict[str, Any]] = []
+cache_out_time:int = 0
 
 async def fetch_available_models() -> List[Dict[str, Any]]:
     """
@@ -683,6 +685,12 @@ async def fetch_available_models() -> List[Dict[str, Any]]:
     Raises:
         返回空列表如果获取失败
     """
+    current_timestamp = int(datetime.now(timezone.utc).timestamp())
+    global cache_out_time
+    global model_list
+    if current_timestamp < cache_out_time and model_list:
+        return model_list
+    
     # 获取凭证管理器和可用凭证
     cred_result = await credential_manager.get_valid_credential(mode="antigravity")
     if not cred_result:
@@ -715,7 +723,6 @@ async def fetch_available_models() -> List[Dict[str, Any]]:
 
             # 转换为 OpenAI 格式的模型列表，使用 Model 类
             model_list = []
-            current_timestamp = int(datetime.now(timezone.utc).timestamp())
 
             if 'models' in data and isinstance(data['models'], dict):
                 # 遍历模型字典
@@ -747,6 +754,8 @@ async def fetch_available_models() -> List[Dict[str, Any]]:
                 model_list.append(model_to_dict(claude_opus_model))
 
             log.info(f"[ANTIGRAVITY] Fetched {len(model_list)} available models")
+            model_list.append(model_to_dict(claude_opus_model))
+            cache_out_time = current_timestamp + 300
             return model_list
         else:
             log.error(f"[ANTIGRAVITY] Failed to fetch models ({response.status_code}): {response.text[:500]}")
