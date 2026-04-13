@@ -14,24 +14,24 @@ from log import log
 
 # Default Safety Settings for Google API
 DEFAULT_SAFETY_SETTINGS = [
-    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-    {"category": "HARM_CATEGORY_CIVIC_INTEGRITY", "threshold": "BLOCK_NONE"},
-    {"category": "HARM_CATEGORY_IMAGE_HATE", "threshold": "BLOCK_NONE"},
-    {"category": "HARM_CATEGORY_IMAGE_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-    {"category": "HARM_CATEGORY_IMAGE_HARASSMENT", "threshold": "BLOCK_NONE"},
-    {"category": "HARM_CATEGORY_IMAGE_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-    {"category": "HARM_CATEGORY_JAILBREAK", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF"},
+    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "OFF"},
+    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "OFF"},
+    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "OFF"},
+    {"category": "HARM_CATEGORY_CIVIC_INTEGRITY", "threshold": "OFF"},
+    {"category": "HARM_CATEGORY_IMAGE_HATE", "threshold": "OFF"},
+    {"category": "HARM_CATEGORY_IMAGE_DANGEROUS_CONTENT", "threshold": "OFF"},
+    {"category": "HARM_CATEGORY_IMAGE_HARASSMENT", "threshold": "OFF"},
+    {"category": "HARM_CATEGORY_IMAGE_SEXUALLY_EXPLICIT", "threshold": "OFF"},
+    {"category": "HARM_CATEGORY_JAILBREAK", "threshold": "OFF"},
 ]
 
 LITE_SAFETY_SETTINGS = [
-    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-    {"category": "HARM_CATEGORY_CIVIC_INTEGRITY", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "OFF"},
+    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "OFF"},
+    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "OFF"},
+    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF"},
+    {"category": "HARM_CATEGORY_CIVIC_INTEGRITY", "threshold": "OFF"},
 ]
 
 def prepare_image_generation_request(
@@ -219,7 +219,7 @@ async def normalize_gemini_request(
 
     result = request.copy()
     model = result.get("model", "")
-    generation_config = (result.get("generationConfig") or {}).copy()  # 创建副本避免修改原对象
+    generation_config = result.get("generationConfig") or {}
     tools = result.get("tools")
     system_instruction = result.get("systemInstruction") or result.get("system_instructions")
     
@@ -407,10 +407,9 @@ async def normalize_gemini_request(
     # ========== 公共处理 ==========
 
     # 1. 安全设置覆盖
-    if "lite" in model.lower():
-        result["safetySettings"] = LITE_SAFETY_SETTINGS
-    else:
-        result["safetySettings"] = DEFAULT_SAFETY_SETTINGS
+    result["safetySettings"] = result.get("safetySettings") or (
+        LITE_SAFETY_SETTINGS if "lite" in model.lower() else DEFAULT_SAFETY_SETTINGS
+    )
 
     # 2. 参数范围限制
     if generation_config:
